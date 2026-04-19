@@ -1,0 +1,78 @@
+{
+  "name": "local-voice-ai",
+  "displayName": "Local Voice AI",
+  "description": "Fully offline push-to-talk dictation and AI prompting for VS Code, powered by whisper.cpp. No data leaves the machine.",
+  "version": "0.0.1",
+  "publisher": "localvoiceai",
+  "engines": { "vscode": "^1.85.0" },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/abinovarghese/local-voice-ai.git"
+  },
+  "bugs": {
+    "url": "https://github.com/abinovarghese/local-voice-ai/issues"
+  },
+  "homepage": "https://github.com/abinovarghese/local-voice-ai#readme",
+  "categories": ["Other", "Machine Learning"],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "localVoiceAI.toggleDictation",
+        "title": "Voice AI: Toggle Dictation"
+      },
+      {
+        "command": "localVoiceAI.openMic",
+        "title": "Voice AI: Open Microphone Panel"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "localVoiceAI.toggleDictation",
+        "key": "ctrl+shift+space"
+      }
+    ],
+    "configuration": {
+      "title": "Local Voice AI",
+      "properties": {
+        "localVoiceAI.whisperBinaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to whisper-cli.exe (or main.exe) from a whisper.cpp Windows release."
+        },
+        "localVoiceAI.whisperModelPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to a ggml Whisper model, e.g. ggml-base.en-q5_1.bin"
+        },
+        "localVoiceAI.language": {
+          "type": "string",
+          "default": "en",
+          "description": "Language code passed to whisper.cpp (-l). Use 'auto' to autodetect."
+        },
+        "localVoiceAI.threads": {
+          "type": "number",
+          "default": 4,
+          "description": "CPU threads for whisper.cpp (-t)."
+        },
+        "localVoiceAI.aiChatCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Optional VS Code command ID to invoke with the transcript after recording (e.g. 'workbench.action.chat.open' for GitHub Copilot Chat). Leave blank to insert at the cursor instead."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

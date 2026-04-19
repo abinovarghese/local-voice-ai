@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; media-src *;" />
+<title>Voice AI Mic</title>
+<style>
+  body {
+    font-family: var(--vscode-font-family, sans-serif);
+    color: var(--vscode-foreground);
+    background: var(--vscode-editor-background);
+    padding: 1rem;
+    font-size: 13px;
+  }
+  h3 { margin-top: 0; }
+  #status { margin-top: 1rem; font-size: 1.1rem; }
+  .dot {
+    display: inline-block; width: 12px; height: 12px; border-radius: 50%;
+    background: #888; margin-right: 8px; vertical-align: middle;
+  }
+  .dot.rec { background: #e24; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%{opacity:1} 50%{opacity:.3} 100%{opacity:1} }
+  button {
+    padding: .5rem 1rem; font-size: 1rem; cursor: pointer;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: 1px solid var(--vscode-button-border, transparent);
+  }
+  button:hover { background: var(--vscode-button-hoverBackground); }
+  #meter {
+    width: 100%; height: 8px; background: #333; border-radius: 4px; margin-top: .5rem; overflow: hidden;
+  }
+  #meterFill { height: 100%; width: 0%; background: #4caf50; transition: width 60ms linear; }
+  .muted { opacity: .7; font-size: .9em; }
+</style>
+</head>
+<body>
+<h3>🎙️ Voice AI Microphone</h3>
+<p class="muted">
+  Keep this panel open. Press <b>Ctrl+Shift+Space</b> (or click the mic in the status bar)
+  to start/stop recording. All audio is processed locally — nothing leaves this machine.
+</p>
+<button id="init">Grant Microphone Access</button>
+<div id="status"><span class="dot" id="dot"></span><span id="label">Not initialized</span></div>
+<div id="meter"><div id="meterFill"></div></div>
+
+<script>
+(function () {
+  const vscode = acquireVsCodeApi();
+
+  const TARGET_RATE = 16000; // whisper.cpp expects 16 kHz mono
+
+  let audioCtx = null;
+  let mediaStream = null;
+  let source = null;
+  let processor = null;
+  let inputRate = TARGET_RATE;
+  let buffers = [];
+  let recording = false;
+  let initialized = false;
+
+  const dot = document.getElementById('dot');
+  const label = document.getElementById('label');
+  const initBtn = document.getElementById('init');
+  const meterFill = document.getElementById('meterFill');
+
+  function post(m) { vscode.postMessage(m); }
+  function log(m) { post({ type: 'log', message: String(m) }); }
+
+  async function initMic() {
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+      // Try to open AudioContext at 16 kHz; browsers may ignore and pick device rate.
+      try {
+        audioCtx = new AudioContext({ sampleRate: TARGET_RATE });
+      } catch (e) {
+        audioCtx = new AudioContext();
+      }
+      inputRate = audioCtx.sampleRate;
+      log('AudioContext sampleRate = ' + inputRate);
+
+      source = audioCtx.createMediaStreamSource(mediaStream);
+      processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      processor.onaudioprocess = (e) => {
+        const ch = e.inputBuffer.getChannelData(0);
+        // VU meter
+        let peak = 0;
+        for (let i = 0; i < ch.length; i++) {
+          const v = Math.abs(ch[i]);
+          if (v > peak) peak = v;
+        }
+        meterFill.style.width = Math.min(100, peak * 140) + '%';
+
+        if (recording) {
+          buffers.push(new Float32Array(ch));
+        }
+      };
+      source.connect(processor);
+      // ScriptProcessor must be connected to destination to run; use a gain of 0 to stay silent.
+      const silent = audioCtx.createGain();
+      silent.gain.value = 0;
+      processor.connect(silent);
+      silent.connect(audioCtx.destination);
+
+      initialized = true;
+      initBtn.style.display = 'none';
+      label.textContent = 'Ready';
+      post({ type: 'ready' });
+    } catch (err) {
+      label.textContent = 'Mic blocked';
+      post({ type: 'error', message: 'Microphone access failed: ' + err.message });
+    }
+  }
+
+  initBtn.addEventListener('click', initMic);
+
+  // Try once automatically; the first call is what triggers the permission prompt.
+  initMic();
+
+  function start() {
+    if (!initialized || !audioCtx) {
+      post({ type: 'error', message: 'Mic not initialized — click "Grant Microphone Access".' });
+      return;
+    }
+    if (audioCtx.state === 'suspended') { audioCtx.resume(); }
+    buffers = [];
+    recording = true;
+    dot.classList.add('rec');
+    label.textContent = 'Recording…';
+    post({ type: 'started' });
+  }
+
+  function stop() {
+    if (!recording) return;
+    recording = false;
+    dot.classList.remove('rec');
+    label.textContent = 'Encoding…';
+
+    // Flatten
+    let total = 0;
+    for (const b of buffers) total += b.length;
+    if (total === 0) {
+      label.textContent = 'Ready';
+      post({ type: 'audio', data: '' });
+      return;
+    }
+    const flat = new Float32Array(total);
+    let off = 0;
+    for (const b of buffers) { flat.set(b, off); off += b.length; }
+    buffers = [];
+
+    // Resample to 16 kHz if needed (linear interpolation — good enough for speech)
+    const resampled = (inputRate === TARGET_RATE) ? flat : resampleLinear(flat, inputRate, TARGET_RATE);
+    const wav = encodeWav(resampled, TARGET_RATE);
+    const b64 = bytesToBase64(new Uint8Array(wav));
+
+    label.textContent = 'Transcribing…';
+    post({ type: 'audio', data: b64 });
+    setTimeout(() => { if (!recording) label.textContent = 'Ready'; }, 1500);
+  }
+
+  function resampleLinear(input, inRate, outRate) {
+    const ratio = inRate / outRate;
+    const outLen = Math.floor(input.length / ratio);
+    const out = new Float32Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+      const src = i * ratio;
+      const i0 = Math.floor(src);
+      const i1 = Math.min(i0 + 1, input.length - 1);
+      const t = src - i0;
+      out[i] = input[i0] * (1 - t) + input[i1] * t;
+    }
+    return out;
+  }
+
+  function encodeWav(samples, sampleRate) {
+    const byteLen = samples.length * 2;
+    const buf = new ArrayBuffer(44 + byteLen);
+    const dv = new DataView(buf);
+    const writeStr = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+
+    writeStr(0, 'RIFF');
+    dv.setUint32(4, 36 + byteLen, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    dv.setUint32(16, 16, true);          // fmt chunk size
+    dv.setUint16(20, 1, true);           // PCM
+    dv.setUint16(22, 1, true);           // channels (mono)
+    dv.setUint32(24, sampleRate, true);  // sample rate
+    dv.setUint32(28, sampleRate * 2, true); // byte rate (sr * channels * bytesPerSample)
+    dv.setUint16(32, 2, true);           // block align
+    dv.setUint16(34, 16, true);          // bits per sample
+    writeStr(36, 'data');
+    dv.setUint32(40, byteLen, true);
+
+    // Int16 PCM samples
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++, offset += 2) {
+      let s = Math.max(-1, Math.min(1, samples[i]));
+      dv.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+    return buf;
+  }
+
+  function bytesToBase64(bytes) {
+    // Chunked conversion to avoid stack overflow on long clips.
+    let binary = '';
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(binary);
+  }
+
+  window.addEventListener('message', (e) => {
+    const m = e.data || {};
+    if (m.type === 'start') start();
+    else if (m.type === 'stop') stop();
+  });
+})();
+</script>
+</body>
+</html>
