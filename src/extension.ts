@@ -11,7 +11,26 @@ let isRecording = false;
 let statusItem: vscode.StatusBarItem;
 let extCtx: vscode.ExtensionContext;
 let lastEditor: vscode.TextEditor | undefined;
-let cachedAssets: WhisperAssets | undefined;
+let cachedAssetsPromise: Promise<WhisperAssets | undefined> | undefined;
+let cachedAssetsValue: WhisperAssets | undefined;
+let chunkInFlight = false;
+
+function getAssets(): Promise<WhisperAssets | undefined> {
+  if (cachedAssetsPromise) { return cachedAssetsPromise; }
+  cachedAssetsPromise = (async () => {
+    try {
+      const result = await ensureWhisperAssets(extCtx);
+      cachedAssetsValue = result;
+      if (!result) { cachedAssetsPromise = undefined; }
+      return result;
+    } catch (err) {
+      cachedAssetsPromise = undefined;
+      cachedAssetsValue = undefined;
+      throw err;
+    }
+  })();
+  return cachedAssetsPromise;
+}
 
 export function activate(context: vscode.ExtensionContext) {
   extCtx = context;
@@ -54,10 +73,8 @@ async function toggleDictation() {
     );
     return;
   }
-  if (!cachedAssets) {
-    cachedAssets = await ensureWhisperAssets(extCtx);
-    if (!cachedAssets) { return; }
-  }
+  const assets = await getAssets();
+  if (!assets) { return; }
   if (isRecording) {
     voicePanel.webview.postMessage({ type: 'stop' });
   } else {
@@ -76,9 +93,10 @@ async function toggleVoiceCommands() {
 }
 
 async function installAssets() {
-  cachedAssets = undefined;
-  cachedAssets = await ensureWhisperAssets(extCtx);
-  if (cachedAssets) {
+  cachedAssetsPromise = undefined;
+  cachedAssetsValue = undefined;
+  const assets = await getAssets();
+  if (assets) {
     vscode.window.showInformationMessage('Voice AI: whisper.cpp and model ready.');
   }
 }
@@ -139,10 +157,15 @@ async function ensurePanel() {
   });
 
   voicePanel.onDidDispose(() => {
+    const wasRecording = isRecording;
     voicePanel = undefined;
     webviewReady = false;
     isRecording = false;
+    chunkInFlight = false;
     updateStatus(false);
+    if (wasRecording) {
+      vscode.window.showInformationMessage('Voice AI: recording canceled — mic panel was closed.');
+    }
   });
 }
 
@@ -171,14 +194,19 @@ function updateStatus(recording: boolean) {
 }
 
 async function handleChunk(base64Wav: string) {
-  if (!base64Wav || !cachedAssets) { return; }
+  const ack = () => voicePanel?.webview.postMessage({ type: 'chunkAck' });
+  if (!base64Wav || !cachedAssetsValue || chunkInFlight) { ack(); return; }
+  chunkInFlight = true;
   try {
-    const interim = await transcribeWav(base64Wav, transcribeOpts(cachedAssets));
+    const interim = await transcribeWav(base64Wav, transcribeOpts(cachedAssetsValue));
     if (interim) {
       vscode.window.setStatusBarMessage(`Voice AI: ${shorten(interim, 80)}`, 4000);
     }
   } catch {
     // Chunk failures are non-fatal; final pass still runs on stop.
+  } finally {
+    chunkInFlight = false;
+    ack();
   }
 }
 
@@ -187,9 +215,8 @@ async function handleFinalAudio(base64Wav: string) {
     vscode.window.setStatusBarMessage('Voice AI: (empty transcript)', 3000);
     return;
   }
-  const assets = cachedAssets ?? (await ensureWhisperAssets(extCtx));
+  const assets = await getAssets();
   if (!assets) { return; }
-  cachedAssets = assets;
 
   let transcript = '';
   try {
@@ -233,19 +260,27 @@ async function deliverTranscript(transcript: string) {
 
   if (chatCmd) {
     await vscode.env.clipboard.writeText(transcript);
-    try {
-      await vscode.commands.executeCommand(chatCmd, transcript);
-    } catch {
-      try {
-        await vscode.commands.executeCommand(chatCmd, { query: transcript });
-      } catch {
-        try { await vscode.commands.executeCommand(chatCmd); } catch { /* ignore */ }
-      }
+    const variants: Array<() => Thenable<unknown>> = [
+      () => vscode.commands.executeCommand(chatCmd, transcript),
+      () => vscode.commands.executeCommand(chatCmd, { query: transcript }),
+      () => vscode.commands.executeCommand(chatCmd),
+    ];
+    let lastErr: any;
+    for (const run of variants) {
+      try { await run(); lastErr = undefined; break; }
+      catch (err) { lastErr = err; }
     }
-    vscode.window.setStatusBarMessage(
-      `Voice AI → chat: "${shorten(transcript)}" (also on clipboard)`,
-      4000
-    );
+    if (lastErr) {
+      vscode.window.showWarningMessage(
+        `Voice AI: chat command "${chatCmd}" failed — transcript is on the clipboard. ` +
+        `(${lastErr?.message ?? 'unknown error'})`
+      );
+    } else {
+      vscode.window.setStatusBarMessage(
+        `Voice AI → chat: "${shorten(transcript)}" (also on clipboard)`,
+        4000
+      );
+    }
     return;
   }
 

@@ -22,7 +22,7 @@ const BUILT_IN_COMMANDS: VoiceCommand[] = [
   { pattern: '^stop tests?$', command: 'testing.cancelRun' },
   { pattern: '^find$', command: 'actions.find' },
   { pattern: '^replace$', command: 'editor.action.startFindReplaceAction' },
-  { pattern: '^go to line (\\d+)$', command: 'revealLine', args: [{ lineNumber: '$1', at: 'top' }] },
+  { pattern: '^go to line (\\d+)$', command: 'revealLine', args: [{ lineNumber: '$1-1', at: 'top' }] },
   { pattern: '^format( document)?$', command: 'editor.action.formatDocument' },
   { pattern: '^comment( line)?$', command: 'editor.action.commentLine' },
   { pattern: '^undo$', command: 'undo' },
@@ -64,6 +64,13 @@ function substituteCaptures(value: any, match: RegExpMatchArray): any {
     return out;
   }
   if (typeof value !== 'string') { return value; }
+  // Arithmetic form, e.g. "$1-1" or "$2+10" — captured number with a constant offset.
+  const arith = value.match(/^\$(\d+)([+-])(\d+)$/);
+  if (arith) {
+    const captured = Number(match[Number(arith[1])]);
+    const delta = Number(arith[3]);
+    return arith[2] === '+' ? captured + delta : captured - delta;
+  }
   const m = value.match(/^\$(\d+)$/);
   if (m) {
     const captured = match[Number(m[1])];

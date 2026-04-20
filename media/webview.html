@@ -76,6 +76,7 @@
   let preRoll = [];                  // ring of recent Float32Arrays while idle, seeded into buffers on wake
   let preRollSamples = 0;
   let startedFromWake = false;
+  let waitingForStart = false;       // true between posting 'wake' and receiving 'start' back
   let recording = false;
   let initialized = false;
 
@@ -195,7 +196,7 @@
 
     // Not recording — watch for wake if enabled. Keep a short pre-roll so the
     // first syllable isn't clipped when wake fires.
-    if (config.wakeOnVoice && initialized) {
+    if (config.wakeOnVoice && initialized && !waitingForStart) {
       preRoll.push(new Float32Array(ch));
       preRollSamples += ch.length;
       const maxPre = Math.floor(WAKE_PREROLL_SECONDS * inputRate);
@@ -207,6 +208,7 @@
         else if (now - voiceStartedAt >= config.wakeDurationMs) {
           voiceStartedAt = 0;
           startedFromWake = true;
+          waitingForStart = true;
           post({ type: 'wake' });
         }
       } else {
@@ -218,17 +220,15 @@
   function emitChunk() {
     chunkRunning = true;
     lastChunkAt = performance.now();
-    try {
-      const maxSamples = Math.floor(MAX_PREVIEW_SECONDS * inputRate);
-      const snapshot = flattenTail(buffers, maxSamples);
-      if (snapshot.length === 0) return;
-      const resampled = (inputRate === TARGET_RATE) ? snapshot : resampleLinear(snapshot, inputRate, TARGET_RATE);
-      const wav = encodeWav(resampled, TARGET_RATE);
-      const b64 = bytesToBase64(new Uint8Array(wav));
-      post({ type: 'chunk', data: b64 });
-    } finally {
-      setTimeout(() => { chunkRunning = false; }, 100);
-    }
+    const maxSamples = Math.floor(MAX_PREVIEW_SECONDS * inputRate);
+    const snapshot = flattenTail(buffers, maxSamples);
+    if (snapshot.length === 0) { chunkRunning = false; return; }
+    const resampled = (inputRate === TARGET_RATE) ? snapshot : resampleLinear(snapshot, inputRate, TARGET_RATE);
+    const wav = encodeWav(resampled, TARGET_RATE);
+    const b64 = bytesToBase64(new Uint8Array(wav));
+    post({ type: 'chunk', data: b64 });
+    // chunkRunning stays true until the host posts 'chunkAck', which prevents stampede
+    // if transcription is slower than the chunk interval.
   }
 
   function start() {
@@ -239,8 +239,10 @@
     if (audioCtx.state === 'suspended') { audioCtx.resume(); }
     buffers = startedFromWake ? preRoll.slice() : [];
     startedFromWake = false;
+    waitingForStart = false;
     preRoll = [];
     preRollSamples = 0;
+    chunkRunning = false;   // reset in case a previous chunk's ack never arrived (e.g. panel hidden)
     recording = true;
     recordingStartedAt = performance.now();
     silenceStartedAt = 0;
@@ -256,6 +258,7 @@
   function stop() {
     if (!recording) return;
     recording = false;
+    waitingForStart = false;
     dot.classList.remove('rec');
     label.textContent = 'Encoding…';
 
@@ -360,6 +363,7 @@
     const m = e.data || {};
     if (m.type === 'start') { start(); }
     else if (m.type === 'stop') { stop(); }
+    else if (m.type === 'chunkAck') { chunkRunning = false; }
     else if (m.type === 'config') {
       Object.assign(config, {
         streamingPreview: !!m.streamingPreview,
