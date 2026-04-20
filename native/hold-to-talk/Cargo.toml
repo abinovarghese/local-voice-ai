@@ -15,10 +15,3 @@ windows-sys = { version = "0.52", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
-
-[profile.release]
-opt-level = "z"
-lto = true
-strip = true
-codegen-units = 1
-panic = "abort"

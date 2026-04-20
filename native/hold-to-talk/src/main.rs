@@ -72,7 +72,7 @@ unsafe extern "system" fn hook_proc(n_code: i32, w_param: WPARAM, l_param: LPARA
             }
         }
     }
-    CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
+    CallNextHookEx(0, n_code, w_param, l_param)
 }
 
 #[cfg(windows)]
@@ -151,8 +151,8 @@ fn main() {
     emit("ready", vk, mods);
 
     unsafe {
-        let hook = SetWindowsHookExA(WH_KEYBOARD_LL, Some(hook_proc), std::ptr::null_mut(), 0);
-        if hook.is_null() {
+        let hook = SetWindowsHookExA(WH_KEYBOARD_LL, Some(hook_proc), 0, 0);
+        if hook == 0 {
             eprintln!("SetWindowsHookExA failed");
             std::process::exit(1);
         }
@@ -160,7 +160,7 @@ fn main() {
         let mut msg: MSG = std::mem::zeroed();
         // GetMessageA returns >0 on message, 0 on WM_QUIT, -1 on error.
         loop {
-            let ret = GetMessageA(&mut msg, std::ptr::null_mut(), 0, 0);
+            let ret = GetMessageA(&mut msg, 0, 0, 0);
             if ret == 0 || ret == -1 { break; }
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
