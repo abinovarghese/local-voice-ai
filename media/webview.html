@@ -55,6 +55,7 @@
   const TARGET_RATE = 16000;
   const MAX_PREVIEW_SECONDS = 20;    // cap interim-chunk size so long recordings stay snappy
   const WAKE_PREROLL_SECONDS = 0.7;  // audio kept before wake fires, to avoid clipping first syllable
+  const CALIBRATION_MS = 2000;       // ambient-noise sampling window on mic init
 
   const config = {
     streamingPreview: true,
@@ -65,7 +66,14 @@
     wakeOnVoice: false,
     wakeThresholdDb: -30,
     wakeDurationMs: 400,
+    autoCalibrate: true,
   };
+
+  let calibrating = false;
+  let calibrationStart = 0;
+  let calibrationPeaks = [];
+  let hasCalibrated = false;
+  let configReceived = false;
 
   let audioCtx = null;
   let mediaStream = null;
@@ -146,6 +154,7 @@
       initBtn.style.display = 'none';
       setIdleLabel();
       post({ type: 'ready' });
+      maybeStartCalibration();
     } catch (err) {
       label.textContent = 'Mic blocked';
       post({ type: 'error', message: 'Microphone access failed: ' + err.message });
@@ -164,6 +173,12 @@
     meterFill.style.width = Math.min(100, peak * 140) + '%';
 
     const peakDb = peak > 0 ? 20 * Math.log10(peak) : -120;
+
+    if (calibrating) {
+      calibrationPeaks.push(peak);
+      if (now - calibrationStart >= CALIBRATION_MS) { finishCalibration(); }
+      return;
+    }
 
     if (recording) {
       buffers.push(new Float32Array(ch));
@@ -215,6 +230,35 @@
         voiceStartedAt = 0;
       }
     }
+  }
+
+  function maybeStartCalibration() {
+    if (!config.autoCalibrate) return;
+    if (!initialized || !configReceived) return;
+    if (hasCalibrated || calibrating || recording) return;
+    calibrating = true;
+    calibrationStart = performance.now();
+    calibrationPeaks = [];
+    label.textContent = 'Calibrating mic (2s)…';
+    dot.classList.remove('rec', 'wake');
+  }
+
+  function finishCalibration() {
+    calibrating = false;
+    hasCalibrated = true;
+    if (calibrationPeaks.length === 0) { setIdleLabel(); return; }
+    const sorted = calibrationPeaks.slice().sort((a, b) => a - b);
+    const p90 = sorted[Math.floor(sorted.length * 0.9)] || 0;
+    const floorDb = p90 > 0 ? 20 * Math.log10(p90) : -80;
+    const silenceDb = Math.min(-25, floorDb + 10);
+    const wakeDb = Math.min(-10, floorDb + 25);
+    config.silenceThresholdDb = silenceDb;
+    config.wakeThresholdDb = wakeDb;
+    log('Calibrated: noise floor=' + floorDb.toFixed(1) +
+        ' dB → silence=' + silenceDb.toFixed(1) +
+        ' dB, wake=' + wakeDb.toFixed(1) + ' dB');
+    calibrationPeaks = [];
+    setIdleLabel();
   }
 
   function emitChunk() {
@@ -374,9 +418,16 @@
         wakeOnVoice: !!m.wakeOnVoice,
         wakeThresholdDb: Number(m.wakeThresholdDb) || -30,
         wakeDurationMs: Math.max(100, Number(m.wakeDurationMs) || 400),
+        autoCalibrate: m.autoCalibrate !== false,
       });
+      configReceived = true;
       updateModeHint();
-      if (!recording) setIdleLabel();
+      if (!recording && !calibrating) setIdleLabel();
+      maybeStartCalibration();
+    }
+    else if (m.type === 'recalibrate') {
+      hasCalibrated = false;
+      maybeStartCalibration();
     }
   });
 })();

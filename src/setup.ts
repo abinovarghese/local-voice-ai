@@ -17,6 +17,18 @@ export interface WhisperAssets {
   modelPath: string;
 }
 
+export async function downloadModelToStorage(
+  context: vscode.ExtensionContext,
+  url: string,
+  filename: string,
+  title: string
+): Promise<string> {
+  const storageDir = context.globalStorageUri.fsPath;
+  await fs.promises.mkdir(storageDir, { recursive: true });
+  const dest = path.join(storageDir, filename);
+  return downloadWithProgress(url, dest, title);
+}
+
 export async function ensureWhisperAssets(
   context: vscode.ExtensionContext
 ): Promise<WhisperAssets | undefined> {

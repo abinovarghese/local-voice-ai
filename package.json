@@ -2,7 +2,7 @@
   "name": "local-voice-ai",
   "displayName": "Local Voice AI",
   "description": "Fully offline push-to-talk dictation, voice commands, and AI prompting for VS Code, powered by whisper.cpp. No data leaves the machine.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "abinovarghese",
   "engines": { "vscode": "^1.85.0" },
   "license": "MIT",
@@ -36,6 +36,18 @@
       {
         "command": "localVoiceAI.installAssets",
         "title": "Voice AI: Install / Update whisper.cpp + Model"
+      },
+      {
+        "command": "localVoiceAI.pickModel",
+        "title": "Voice AI: Choose Whisper Model…"
+      },
+      {
+        "command": "localVoiceAI.showHistory",
+        "title": "Voice AI: Show Transcript History"
+      },
+      {
+        "command": "localVoiceAI.recalibrate",
+        "title": "Voice AI: Recalibrate Noise Floor"
       }
     ],
     "keybindings": [
@@ -134,6 +146,11 @@
           "default": 400,
           "minimum": 100,
           "description": "Duration of sustained voice (ms) required to trigger wake activation."
+        },
+        "localVoiceAI.autoCalibrate": {
+          "type": "boolean",
+          "default": true,
+          "description": "On mic init, sample 2 seconds of ambient noise and derive silence/wake thresholds from it. Overrides the static dB settings above while active."
         }
       }
     }

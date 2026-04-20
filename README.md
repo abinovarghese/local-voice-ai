@@ -24,6 +24,11 @@ Works on **Windows, macOS, and Linux**.
 - [x] **Auto-stop on silence** — press once, talk, recording ends automatically
 - [x] **Wake-on-voice** — hands-free activation from sustained voice energy
 
+**Phase 3 — shipped**
+- [x] **Auto-calibration** — 2-second ambient-noise sample on mic init sets silence / wake thresholds for your room
+- [x] **Model picker** — `Voice AI: Choose Whisper Model…` to swap between tiny / base / small / multilingual without editing config
+- [x] **Transcript history** — `Voice AI: Show Transcript History` — last 50 transcripts with delivery method (editor / chat / command / clipboard), stored locally
+
 ---
 
 ## Install
