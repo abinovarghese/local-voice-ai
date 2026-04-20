@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { ensureWhisperAssets, downloadModelToStorage, WhisperAssets } from './setup';
+import { ensureWhisperAssets, downloadModelToStorage, ensureNativeAssets, WhisperAssets } from './setup';
 import { transcribeWav } from './transcribe';
 import { matchVoiceCommand, executeVoiceCommand } from './commands';
 import { MODEL_CHOICES } from './models';
 import { TranscriptHistory, renderHistoryHtml } from './history';
+import { NativeKeyboard } from './nativeKeyboard';
+import { loadNativeBinding, isNativeBindingSupported, NativeTranscriber } from './nativeStreaming';
 
 let voicePanel: vscode.WebviewPanel | undefined;
 let webviewReady = false;
@@ -18,6 +20,8 @@ let cachedAssetsValue: WhisperAssets | undefined;
 let chunkInFlight = false;
 let history: TranscriptHistory;
 let historyPanel: vscode.WebviewPanel | undefined;
+let nativeKeyboard: NativeKeyboard | undefined;
+let nativeTranscriber: NativeTranscriber | undefined;
 
 function getAssets(): Promise<WhisperAssets | undefined> {
   if (cachedAssetsPromise) { return cachedAssetsPromise; }
@@ -62,15 +66,19 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('localVoiceAI.pickModel', pickModel),
     vscode.commands.registerCommand('localVoiceAI.showHistory', showHistory),
     vscode.commands.registerCommand('localVoiceAI.recalibrate', recalibrate),
+    vscode.commands.registerCommand('localVoiceAI.toggleHoldToTalk', toggleHoldToTalk),
   );
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('localVoiceAI')) {
         sendConfigToWebview();
+        syncNativeKeyboardState();
       }
     })
   );
+
+  syncNativeKeyboardState();
 }
 
 async function toggleDictation() {
@@ -167,6 +175,109 @@ function recalibrate() {
   }
   voicePanel.webview.postMessage({ type: 'recalibrate' });
   vscode.window.setStatusBarMessage('Voice AI: recalibrating noise floor…', 3000);
+}
+
+async function toggleHoldToTalk() {
+  const cfg = vscode.workspace.getConfiguration('localVoiceAI');
+  const next = !cfg.get<boolean>('holdToTalk', false);
+  await cfg.update('holdToTalk', next, vscode.ConfigurationTarget.Global);
+  vscode.window.setStatusBarMessage(
+    `Voice AI: hold-to-talk ${next ? 'enabled' : 'disabled'}`,
+    2500
+  );
+}
+
+async function syncNativeKeyboardState() {
+  const cfg = vscode.workspace.getConfiguration('localVoiceAI');
+  const want = cfg.get<boolean>('holdToTalk', false);
+  const hotkey = cfg.get<string>('holdToTalkHotkey', 'ctrl+shift+space');
+
+  if (!want) {
+    stopNativeKeyboard();
+    return;
+  }
+
+  if (process.platform !== 'win32') {
+    vscode.window.showWarningMessage(
+      'Voice AI: hold-to-talk currently ships only for Windows. Ignoring localVoiceAI.holdToTalk on this platform.'
+    );
+    return;
+  }
+
+  if (nativeKeyboard) { return; }
+
+  let binary: string | undefined;
+  try {
+    const assets = await ensureNativeAssets(extCtx, { keyboard: true, streaming: false });
+    binary = assets.holdToTalkExe;
+  } catch (err: any) {
+    vscode.window.showErrorMessage(`Voice AI: failed to fetch hold-to-talk helper — ${err.message}`);
+    return;
+  }
+  if (!binary) { return; }
+
+  nativeKeyboard = new NativeKeyboard({
+    binary,
+    hotkey,
+    onKeyDown: () => onHoldToTalkKeyDown(),
+    onKeyUp: () => onHoldToTalkKeyUp(),
+    onError: (err) => console.error('[VoiceAI hold-to-talk]', err),
+  });
+  extCtx.subscriptions.push(nativeKeyboard);
+
+  try {
+    await nativeKeyboard.start();
+    await vscode.commands.executeCommand('setContext', 'localVoiceAIHoldToTalkActive', true);
+    vscode.window.setStatusBarMessage(`Voice AI: hold-to-talk active (${hotkey})`, 3000);
+  } catch (err: any) {
+    vscode.window.showErrorMessage(`Voice AI: hold-to-talk helper failed to start — ${err.message}`);
+    nativeKeyboard.dispose();
+    nativeKeyboard = undefined;
+  }
+}
+
+function stopNativeKeyboard() {
+  if (nativeKeyboard) {
+    nativeKeyboard.dispose();
+    nativeKeyboard = undefined;
+  }
+  void vscode.commands.executeCommand('setContext', 'localVoiceAIHoldToTalkActive', false);
+}
+
+async function onHoldToTalkKeyDown() {
+  if (!voicePanel || !webviewReady) { await ensurePanel(); return; }
+  const assets = await getAssets();
+  if (!assets) { return; }
+  if (!isRecording) {
+    voicePanel!.webview.postMessage({ type: 'start' });
+  }
+}
+
+function onHoldToTalkKeyUp() {
+  if (voicePanel && webviewReady && isRecording) {
+    voicePanel.webview.postMessage({ type: 'stop' });
+  }
+}
+
+async function getNativeTranscriber(assets: WhisperAssets): Promise<NativeTranscriber | undefined> {
+  const cfg = vscode.workspace.getConfiguration('localVoiceAI');
+  if (!cfg.get<boolean>('useNativeEngine', false)) { return undefined; }
+  if (!isNativeBindingSupported()) { return undefined; }
+  if (nativeTranscriber) { return nativeTranscriber; }
+  try {
+    const native = await ensureNativeAssets(extCtx, { keyboard: false, streaming: true });
+    if (!native.whisperNapiNode) { return undefined; }
+    const binding = loadNativeBinding(native.whisperNapiNode);
+    const language = cfg.get<string>('language') || 'en';
+    const threads = cfg.get<number>('threads') || 4;
+    nativeTranscriber = new NativeTranscriber(binding, assets.modelPath, language, threads);
+    return nativeTranscriber;
+  } catch (err: any) {
+    vscode.window.showWarningMessage(
+      `Voice AI: native engine unavailable — falling back to whisper-cli. (${err.message})`
+    );
+    return undefined;
+  }
 }
 
 async function ensurePanel() {
@@ -267,7 +378,7 @@ async function handleChunk(base64Wav: string) {
   if (!base64Wav || !cachedAssetsValue || chunkInFlight) { ack(); return; }
   chunkInFlight = true;
   try {
-    const interim = await transcribeWav(base64Wav, transcribeOpts(cachedAssetsValue));
+    const interim = await transcribeOnce(base64Wav, cachedAssetsValue);
     if (interim) {
       vscode.window.setStatusBarMessage(`Voice AI: ${shorten(interim, 80)}`, 4000);
     }
@@ -277,6 +388,29 @@ async function handleChunk(base64Wav: string) {
     chunkInFlight = false;
     ack();
   }
+}
+
+async function transcribeOnce(base64Wav: string, assets: WhisperAssets): Promise<string> {
+  const native = await getNativeTranscriber(assets);
+  if (native) {
+    const pcm = wavBase64ToFloat32(base64Wav);
+    if (pcm.length === 0) { return ''; }
+    return native.transcribe(pcm);
+  }
+  return transcribeWav(base64Wav, transcribeOpts(assets));
+}
+
+function wavBase64ToFloat32(base64: string): Float32Array {
+  const buf = Buffer.from(base64, 'base64');
+  if (buf.length <= 44) { return new Float32Array(0); }
+  const data = buf.subarray(44);
+  const count = Math.floor(data.length / 2);
+  const out = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    const s = data.readInt16LE(i * 2);
+    out[i] = s / (s < 0 ? 0x8000 : 0x7fff);
+  }
+  return out;
 }
 
 async function handleFinalAudio(base64Wav: string) {
@@ -291,7 +425,7 @@ async function handleFinalAudio(base64Wav: string) {
   try {
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Window, title: 'Voice AI: transcribing…' },
-      async () => { transcript = await transcribeWav(base64Wav, transcribeOpts(assets)); }
+      async () => { transcript = await transcribeOnce(base64Wav, assets); }
     );
   } catch (err: any) {
     vscode.window.showErrorMessage(`Voice AI: transcription failed — ${err.message}`);

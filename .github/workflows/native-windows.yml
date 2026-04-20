@@ -1,0 +1,68 @@
+name: Native Windows
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'native/**'
+      - '.github/workflows/native-windows.yml'
+  pull_request:
+    paths:
+      - 'native/**'
+      - '.github/workflows/native-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          shared-key: native-windows
+
+      - name: Build hold-to-talk
+        run: cargo build --release --package hold-to-talk --target x86_64-pc-windows-msvc
+
+      - name: Build whisper-napi
+        run: cargo build --release --package whisper-napi --target x86_64-pc-windows-msvc
+
+      - name: Stage artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/hold-to-talk.exe dist/
+          Copy-Item target/x86_64-pc-windows-msvc/release/whisper_napi.dll dist/whisper-napi.node
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-windows
+          path: native/dist/*
+          retention-days: 30
+
+      - name: Attach binaries to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            native/dist/hold-to-talk.exe
+            native/dist/whisper-napi.node
+          fail_on_unmatched_files: true

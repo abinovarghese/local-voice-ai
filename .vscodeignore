@@ -3,6 +3,7 @@
 .github/**
 src/**
 docs/**
+native/**
 .gitignore
 .vscodeignore
 tsconfig.json

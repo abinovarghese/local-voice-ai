@@ -29,6 +29,12 @@ Works on **Windows, macOS, and Linux**.
 - [x] **Model picker** — `Voice AI: Choose Whisper Model…` to swap between tiny / base / small / multilingual without editing config
 - [x] **Transcript history** — `Voice AI: Show Transcript History` — last 50 transcripts with delivery method (editor / chat / command / clipboard), stored locally
 
+**Phase 4 — shipped (Windows x64 only)**
+- [x] **True hold-to-talk** — native `SetWindowsHookEx` keyboard hook (`native/hold-to-talk/`, Rust). Press and hold Ctrl+Shift+Space to record, release to stop. Works even when VS Code isn't focused. Binary downloads from GitHub releases on first use. `localVoiceAI.holdToTalk: true`.
+- [x] **Native whisper.cpp engine** — in-process N-API binding (`native/whisper-napi/`, Rust via `whisper-rs` + `napi-rs`). Eliminates the ~800 ms per-chunk process-spawn + model-reload overhead of `whisper-cli`. Addon downloads on first use. `localVoiceAI.useNativeEngine: true`.
+
+macOS/Linux builds for both deferred. Source is in `native/`; PRs welcome.
+
 ---
 
 ## Install

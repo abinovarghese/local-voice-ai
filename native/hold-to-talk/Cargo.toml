@@ -1,0 +1,24 @@
+[package]
+name = "hold-to-talk"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Low-level Windows keyboard hook that emits keydown/keyup JSON events for a configured hotkey. Child process helper for Local Voice AI."
+
+[[bin]]
+name = "hold-to-talk"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

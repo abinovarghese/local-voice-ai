@@ -1,0 +1,22 @@
+[package]
+name = "whisper-napi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "In-process whisper.cpp binding for Local Voice AI. Avoids the process-spawn overhead of whisper-cli for streaming chunk transcription."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2.16", default-features = false, features = ["napi4"] }
+napi-derive = "2.16"
+whisper-rs = { version = "0.11" }
+
+[build-dependencies]
+napi-build = "2.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

@@ -2,7 +2,7 @@
   "name": "local-voice-ai",
   "displayName": "Local Voice AI",
   "description": "Fully offline push-to-talk dictation, voice commands, and AI prompting for VS Code, powered by whisper.cpp. No data leaves the machine.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "abinovarghese",
   "engines": { "vscode": "^1.85.0" },
   "license": "MIT",
@@ -48,13 +48,18 @@
       {
         "command": "localVoiceAI.recalibrate",
         "title": "Voice AI: Recalibrate Noise Floor"
+      },
+      {
+        "command": "localVoiceAI.toggleHoldToTalk",
+        "title": "Voice AI: Toggle Hold-to-Talk (Windows native helper)"
       }
     ],
     "keybindings": [
       {
         "command": "localVoiceAI.toggleDictation",
         "key": "ctrl+shift+space",
-        "mac": "cmd+shift+space"
+        "mac": "cmd+shift+space",
+        "when": "!localVoiceAIHoldToTalkActive"
       }
     ],
     "configuration": {
@@ -151,6 +156,21 @@
           "type": "boolean",
           "default": true,
           "description": "On mic init, sample 2 seconds of ambient noise and derive silence/wake thresholds from it. Overrides the static dB settings above while active."
+        },
+        "localVoiceAI.holdToTalk": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable true press-and-hold behavior via a native Windows keyboard hook. Requires the hold-to-talk.exe helper (downloaded on first use). Windows x64 only."
+        },
+        "localVoiceAI.holdToTalkHotkey": {
+          "type": "string",
+          "default": "ctrl+shift+space",
+          "description": "Hotkey the native hold-to-talk helper listens for. Format: ctrl+shift+space, alt+f5, etc. Modifiers: ctrl, shift, alt. Keys: letters, digits, f1-f24, space, tab, enter, escape."
+        },
+        "localVoiceAI.useNativeEngine": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use the in-process whisper.cpp binding (whisper-napi.node) instead of spawning whisper-cli per chunk. Faster streaming preview on modest hardware; requires the native addon (downloaded on first use). Windows x64 only."
         }
       }
     }

@@ -29,6 +29,41 @@ export async function downloadModelToStorage(
   return downloadWithProgress(url, dest, title);
 }
 
+export interface NativeAssets {
+  holdToTalkExe?: string;
+  whisperNapiNode?: string;
+}
+
+export async function ensureNativeAssets(
+  context: vscode.ExtensionContext,
+  which: { keyboard: boolean; streaming: boolean }
+): Promise<NativeAssets> {
+  const storageDir = context.globalStorageUri.fsPath;
+  await fs.promises.mkdir(storageDir, { recursive: true });
+  const version = context.extension.packageJSON.version as string;
+  const out: NativeAssets = {};
+
+  if (which.keyboard && currentPlatform() === 'win') {
+    const dest = path.join(storageDir, 'hold-to-talk.exe');
+    if (!fs.existsSync(dest)) {
+      const url = `https://github.com/abinovarghese/local-voice-ai/releases/download/v${version}/hold-to-talk.exe`;
+      await downloadWithProgress(url, dest, 'Downloading native keyboard helper');
+    }
+    out.holdToTalkExe = dest;
+  }
+
+  if (which.streaming && currentPlatform() === 'win') {
+    const dest = path.join(storageDir, 'whisper-napi.node');
+    if (!fs.existsSync(dest)) {
+      const url = `https://github.com/abinovarghese/local-voice-ai/releases/download/v${version}/whisper-napi.node`;
+      await downloadWithProgress(url, dest, 'Downloading native whisper engine');
+    }
+    out.whisperNapiNode = dest;
+  }
+
+  return out;
+}
+
 export async function ensureWhisperAssets(
   context: vscode.ExtensionContext
 ): Promise<WhisperAssets | undefined> {
