@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
-import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
+import { ensureWhisperAssets, WhisperAssets } from './setup';
+import { transcribeWav } from './transcribe';
+import { matchVoiceCommand, executeVoiceCommand } from './commands';
 
 let voicePanel: vscode.WebviewPanel | undefined;
 let webviewReady = false;
@@ -10,6 +11,7 @@ let isRecording = false;
 let statusItem: vscode.StatusBarItem;
 let extCtx: vscode.ExtensionContext;
 let lastEditor: vscode.TextEditor | undefined;
+let cachedAssets: WhisperAssets | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
   extCtx = context;
@@ -21,8 +23,6 @@ export function activate(context: vscode.ExtensionContext) {
   statusItem.show();
   context.subscriptions.push(statusItem);
 
-  // Remember the last real text editor, because when the webview is focused
-  // activeTextEditor becomes undefined.
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor((ed) => {
       if (ed) { lastEditor = ed; }
@@ -32,17 +32,31 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('localVoiceAI.toggleDictation', toggleDictation),
-    vscode.commands.registerCommand('localVoiceAI.openMic', () => ensurePanel())
+    vscode.commands.registerCommand('localVoiceAI.openMic', () => ensurePanel()),
+    vscode.commands.registerCommand('localVoiceAI.toggleVoiceCommands', toggleVoiceCommands),
+    vscode.commands.registerCommand('localVoiceAI.installAssets', installAssets),
+  );
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('localVoiceAI')) {
+        sendConfigToWebview();
+      }
+    })
   );
 }
 
 async function toggleDictation() {
   if (!voicePanel || !webviewReady) {
-    ensurePanel();
+    await ensurePanel();
     vscode.window.showInformationMessage(
       'Voice AI: grant microphone access in the side panel, then press Ctrl+Shift+Space again to record.'
     );
     return;
+  }
+  if (!cachedAssets) {
+    cachedAssets = await ensureWhisperAssets(extCtx);
+    if (!cachedAssets) { return; }
   }
   if (isRecording) {
     voicePanel.webview.postMessage({ type: 'stop' });
@@ -51,7 +65,25 @@ async function toggleDictation() {
   }
 }
 
-function ensurePanel() {
+async function toggleVoiceCommands() {
+  const cfg = vscode.workspace.getConfiguration('localVoiceAI');
+  const current = cfg.get<boolean>('voiceCommandsEnabled', true);
+  await cfg.update('voiceCommandsEnabled', !current, vscode.ConfigurationTarget.Global);
+  vscode.window.setStatusBarMessage(
+    `Voice AI: voice commands ${!current ? 'enabled' : 'disabled'}`,
+    2500
+  );
+}
+
+async function installAssets() {
+  cachedAssets = undefined;
+  cachedAssets = await ensureWhisperAssets(extCtx);
+  if (cachedAssets) {
+    vscode.window.showInformationMessage('Voice AI: whisper.cpp and model ready.');
+  }
+}
+
+async function ensurePanel() {
   if (voicePanel) {
     voicePanel.reveal(vscode.ViewColumn.Beside, true);
     return;
@@ -64,7 +96,7 @@ function ensurePanel() {
     {
       enableScripts: true,
       retainContextWhenHidden: true,
-      localResourceRoots: [vscode.Uri.file(path.join(extCtx.extensionPath, 'media'))]
+      localResourceRoots: [vscode.Uri.file(path.join(extCtx.extensionPath, 'media'))],
     }
   );
 
@@ -75,16 +107,25 @@ function ensurePanel() {
     switch (msg.type) {
       case 'ready':
         webviewReady = true;
+        sendConfigToWebview();
         vscode.window.setStatusBarMessage('Voice AI: mic ready', 2500);
         break;
       case 'started':
         isRecording = true;
         updateStatus(true);
         break;
+      case 'chunk':
+        await handleChunk(msg.data);
+        break;
       case 'audio':
         isRecording = false;
         updateStatus(false);
-        await transcribeAndDeliver(msg.data);
+        await handleFinalAudio(msg.data);
+        break;
+      case 'wake':
+        if (!isRecording) {
+          voicePanel?.webview.postMessage({ type: 'start' });
+        }
         break;
       case 'error':
         isRecording = false;
@@ -92,7 +133,6 @@ function ensurePanel() {
         vscode.window.showErrorMessage(`Voice AI: ${msg.message}`);
         break;
       case 'log':
-        // Useful when debugging the webview
         console.log('[VoiceAI webview]', msg.message);
         break;
     }
@@ -106,6 +146,22 @@ function ensurePanel() {
   });
 }
 
+function sendConfigToWebview() {
+  if (!voicePanel) { return; }
+  const cfg = vscode.workspace.getConfiguration('localVoiceAI');
+  voicePanel.webview.postMessage({
+    type: 'config',
+    streamingPreview: cfg.get<boolean>('streamingPreview', true),
+    streamingChunkSeconds: cfg.get<number>('streamingChunkSeconds', 3),
+    autoStopOnSilence: cfg.get<boolean>('autoStopOnSilence', true),
+    silenceThresholdDb: cfg.get<number>('silenceThresholdDb', -45),
+    silenceDurationMs: cfg.get<number>('silenceDurationMs', 1200),
+    wakeOnVoice: cfg.get<boolean>('wakeOnVoice', false),
+    wakeThresholdDb: cfg.get<number>('wakeThresholdDb', -30),
+    wakeDurationMs: cfg.get<number>('wakeDurationMs', 400),
+  });
+}
+
 function updateStatus(recording: boolean) {
   if (!statusItem) { return; }
   statusItem.text = recording ? '$(record) Recording…' : '$(mic) Voice AI';
@@ -114,55 +170,36 @@ function updateStatus(recording: boolean) {
     : undefined;
 }
 
-async function transcribeAndDeliver(base64Wav: string) {
-  const cfg = vscode.workspace.getConfiguration('localVoiceAI');
-  const binPath = (cfg.get<string>('whisperBinaryPath') || '').trim();
-  const modelPath = (cfg.get<string>('whisperModelPath') || '').trim();
-  const lang = cfg.get<string>('language') || 'en';
-  const threads = cfg.get<number>('threads') || 4;
-  const chatCmd = (cfg.get<string>('aiChatCommand') || '').trim();
-
-  if (!binPath || !modelPath) {
-    vscode.window.showErrorMessage(
-      'Voice AI: set localVoiceAI.whisperBinaryPath and localVoiceAI.whisperModelPath in Settings.'
-    );
-    return;
-  }
-  if (!fs.existsSync(binPath)) {
-    vscode.window.showErrorMessage(`Voice AI: whisper binary not found at ${binPath}`);
-    return;
-  }
-  if (!fs.existsSync(modelPath)) {
-    vscode.window.showErrorMessage(`Voice AI: whisper model not found at ${modelPath}`);
-    return;
-  }
-
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'voiceai-'));
-  const wavPath = path.join(tmpDir, 'clip.wav');
-  const outBase = path.join(tmpDir, 'out');
-
+async function handleChunk(base64Wav: string) {
+  if (!base64Wav || !cachedAssets) { return; }
   try {
-    fs.writeFileSync(wavPath, Buffer.from(base64Wav, 'base64'));
-  } catch (err: any) {
-    vscode.window.showErrorMessage(`Voice AI: failed to write audio: ${err.message}`);
+    const interim = await transcribeWav(base64Wav, transcribeOpts(cachedAssets));
+    if (interim) {
+      vscode.window.setStatusBarMessage(`Voice AI: ${shorten(interim, 80)}`, 4000);
+    }
+  } catch {
+    // Chunk failures are non-fatal; final pass still runs on stop.
+  }
+}
+
+async function handleFinalAudio(base64Wav: string) {
+  if (!base64Wav) {
+    vscode.window.setStatusBarMessage('Voice AI: (empty transcript)', 3000);
     return;
   }
+  const assets = cachedAssets ?? (await ensureWhisperAssets(extCtx));
+  if (!assets) { return; }
+  cachedAssets = assets;
 
   let transcript = '';
   try {
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Window, title: 'Voice AI: transcribing…' },
-      () => runWhisper(binPath, modelPath, wavPath, outBase, lang, threads)
+      async () => { transcript = await transcribeWav(base64Wav, transcribeOpts(assets)); }
     );
-    const txtPath = outBase + '.txt';
-    if (fs.existsSync(txtPath)) {
-      transcript = fs.readFileSync(txtPath, 'utf8').trim();
-    }
   } catch (err: any) {
     vscode.window.showErrorMessage(`Voice AI: transcription failed — ${err.message}`);
     return;
-  } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 
   if (!transcript) {
@@ -170,8 +207,31 @@ async function transcribeAndDeliver(base64Wav: string) {
     return;
   }
 
+  const voiceCommand = matchVoiceCommand(transcript);
+  if (voiceCommand) {
+    try {
+      await executeVoiceCommand(voiceCommand);
+      vscode.window.setStatusBarMessage(
+        `Voice AI → command: ${voiceCommand.command}`,
+        3000
+      );
+      return;
+    } catch (err: any) {
+      vscode.window.showErrorMessage(
+        `Voice AI: command '${voiceCommand.command}' failed — ${err.message}`
+      );
+      return;
+    }
+  }
+
+  await deliverTranscript(transcript);
+}
+
+async function deliverTranscript(transcript: string) {
+  const cfg = vscode.workspace.getConfiguration('localVoiceAI');
+  const chatCmd = (cfg.get<string>('aiChatCommand') || '').trim();
+
   if (chatCmd) {
-    // Copy to clipboard as a universal fallback, then try the configured command.
     await vscode.env.clipboard.writeText(transcript);
     try {
       await vscode.commands.executeCommand(chatCmd, transcript);
@@ -186,52 +246,33 @@ async function transcribeAndDeliver(base64Wav: string) {
       `Voice AI → chat: "${shorten(transcript)}" (also on clipboard)`,
       4000
     );
-  } else {
-    const editor = vscode.window.activeTextEditor ?? lastEditor;
-    if (editor) {
-      await editor.edit((b) => b.insert(editor.selection.active, transcript));
-      // Pop focus back to the editor so typing continues naturally.
-      await vscode.window.showTextDocument(editor.document, editor.viewColumn, false);
-    } else {
-      await vscode.env.clipboard.writeText(transcript);
-      vscode.window.showInformationMessage(
-        `Voice AI: no active editor — copied to clipboard: "${shorten(transcript)}"`
-      );
-    }
+    return;
   }
+
+  const editor = vscode.window.activeTextEditor ?? lastEditor;
+  if (editor) {
+    await editor.edit((b) => b.insert(editor.selection.active, transcript));
+    await vscode.window.showTextDocument(editor.document, editor.viewColumn, false);
+  } else {
+    await vscode.env.clipboard.writeText(transcript);
+    vscode.window.showInformationMessage(
+      `Voice AI: no active editor — copied to clipboard: "${shorten(transcript)}"`
+    );
+  }
+}
+
+function transcribeOpts(assets: WhisperAssets) {
+  const cfg = vscode.workspace.getConfiguration('localVoiceAI');
+  return {
+    binaryPath: assets.binaryPath,
+    modelPath: assets.modelPath,
+    language: cfg.get<string>('language') || 'en',
+    threads: cfg.get<number>('threads') || 4,
+  };
 }
 
 function shorten(s: string, n = 60) {
   return s.length <= n ? s : s.slice(0, n - 1) + '…';
-}
-
-function runWhisper(
-  bin: string,
-  model: string,
-  wav: string,
-  outBase: string,
-  lang: string,
-  threads: number
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const args = [
-      '-m', model,
-      '-f', wav,
-      '-otxt',
-      '-of', outBase,
-      '-l', lang,
-      '-t', String(threads),
-      '-nt'
-    ];
-    const proc = cp.spawn(bin, args, { windowsHide: true });
-    let stderr = '';
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
-    proc.on('error', reject);
-    proc.on('close', (code) => {
-      if (code === 0) { resolve(); }
-      else { reject(new Error(`whisper exited ${code}. ${stderr.slice(-400)}`)); }
-    });
-  });
 }
 
 export function deactivate() {

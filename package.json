@@ -1,9 +1,9 @@
 {
   "name": "local-voice-ai",
   "displayName": "Local Voice AI",
-  "description": "Fully offline push-to-talk dictation and AI prompting for VS Code, powered by whisper.cpp. No data leaves the machine.",
-  "version": "0.0.1",
-  "publisher": "localvoiceai",
+  "description": "Fully offline push-to-talk dictation, voice commands, and AI prompting for VS Code, powered by whisper.cpp. No data leaves the machine.",
+  "version": "0.1.0",
+  "publisher": "abinovarghese",
   "engines": { "vscode": "^1.85.0" },
   "license": "MIT",
   "repository": {
@@ -16,7 +16,9 @@
   "homepage": "https://github.com/abinovarghese/local-voice-ai#readme",
   "categories": ["Other", "Machine Learning"],
   "main": "./out/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "commands": [
       {
@@ -26,12 +28,21 @@
       {
         "command": "localVoiceAI.openMic",
         "title": "Voice AI: Open Microphone Panel"
+      },
+      {
+        "command": "localVoiceAI.toggleVoiceCommands",
+        "title": "Voice AI: Toggle Voice Commands"
+      },
+      {
+        "command": "localVoiceAI.installAssets",
+        "title": "Voice AI: Install / Update whisper.cpp + Model"
       }
     ],
     "keybindings": [
       {
         "command": "localVoiceAI.toggleDictation",
-        "key": "ctrl+shift+space"
+        "key": "ctrl+shift+space",
+        "mac": "cmd+shift+space"
       }
     ],
     "configuration": {
@@ -40,12 +51,12 @@
         "localVoiceAI.whisperBinaryPath": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to whisper-cli.exe (or main.exe) from a whisper.cpp Windows release."
+          "description": "Absolute path to whisper-cli (whisper-cli.exe on Windows). Leave blank to auto-detect or auto-install."
         },
         "localVoiceAI.whisperModelPath": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to a ggml Whisper model, e.g. ggml-base.en-q5_1.bin"
+          "description": "Absolute path to a ggml Whisper model, e.g. ggml-base.en-q5_1.bin. Leave blank to auto-download."
         },
         "localVoiceAI.language": {
           "type": "string",
@@ -60,7 +71,69 @@
         "localVoiceAI.aiChatCommand": {
           "type": "string",
           "default": "",
-          "description": "Optional VS Code command ID to invoke with the transcript after recording (e.g. 'workbench.action.chat.open' for GitHub Copilot Chat). Leave blank to insert at the cursor instead."
+          "description": "Optional VS Code command ID to invoke with the transcript after recording (e.g. 'workbench.action.chat.open'). Leave blank to insert at the cursor instead."
+        },
+        "localVoiceAI.streamingPreview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show interim transcription in the status bar during recording (chunked preview)."
+        },
+        "localVoiceAI.streamingChunkSeconds": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "description": "How often (seconds) to transcribe an interim chunk while recording."
+        },
+        "localVoiceAI.voiceCommandsEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "If a transcript matches a voice-command pattern, execute the command instead of inserting text."
+        },
+        "localVoiceAI.voiceCommands": {
+          "type": "array",
+          "default": [],
+          "description": "Custom voice commands merged with built-ins. Each entry: { pattern, command, args? }. 'pattern' is a case-insensitive regex matched against the transcript.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pattern": { "type": "string" },
+              "command": { "type": "string" },
+              "args": { "type": "array" }
+            },
+            "required": ["pattern", "command"]
+          }
+        },
+        "localVoiceAI.autoStopOnSilence": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically stop recording after a silence window. Gives 'press-once' UX."
+        },
+        "localVoiceAI.silenceThresholdDb": {
+          "type": "number",
+          "default": -45,
+          "description": "Peak energy (dBFS) below which audio counts as silence."
+        },
+        "localVoiceAI.silenceDurationMs": {
+          "type": "number",
+          "default": 1200,
+          "minimum": 200,
+          "description": "Duration of continuous silence (ms) that triggers auto-stop."
+        },
+        "localVoiceAI.wakeOnVoice": {
+          "type": "boolean",
+          "default": false,
+          "description": "Continuously listen and auto-start recording when voice energy is detected."
+        },
+        "localVoiceAI.wakeThresholdDb": {
+          "type": "number",
+          "default": -30,
+          "description": "Peak energy (dBFS) that triggers wake activation."
+        },
+        "localVoiceAI.wakeDurationMs": {
+          "type": "number",
+          "default": 400,
+          "minimum": 100,
+          "description": "Duration of sustained voice (ms) required to trigger wake activation."
         }
       }
     }
